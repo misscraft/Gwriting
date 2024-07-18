@@ -1,28 +1,89 @@
-name: Gwriting
+name: build Gwriter
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
+  issues:
+    types: [opened, edited]
+  schedule:
+    - cron: "0 16 * * *"
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-
+    name: Generate blog
+    runs-on: ubuntu-20.04
+    if: ${{ github.event.repository.owner.id == github.event.sender.id || github.event_name == 'schedule' }}
+    permissions: write-all
     steps:
-    - name: Checkout source code
-      uses: actions/checkout@v2
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Set up Node.js
-      uses: actions/setup-node@v2
-      with:
-        node-version: '14'
+      - name: Setup Pages
+        id: pages
+        uses: actions/configure-pages@v4
 
-    - name: Install dependencies
-      run: npm install
+      - name: Get config.json
+        run: |
+          echo "====== check config.json file ======"
+          cat config.json
+          echo "====== check config.json end  ======"
+          sudo apt-get install jq
 
-    - name: Run script to post blog
-      run: node index.js ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.8
 
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Clone source code
+        run: |
+          GWRITER_VERSION=$(jq -r ".GWRITER_VERSION" config.json)
+          git clone https://github.com/telltear/Gwriting.git /opt/Gwriter
+          cd /opt/Gwriter
+          lastTag=$(git describe --tags `git rev-list --tags --max-count=1`)
+          if [ $GWRITER_VERSION == 'last' ]; then git checkout $lastTag; else git checkout $GWRITER_VERSION; fi
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r /opt/Gwriter/requirements.txt
+
+      - name: Generate new html
+        run: |
+          cp -r ./* /opt/Gwriter/
+          cd /opt/Gwriter/
+          python Gwriter.py ${{ secrets.GITHUB_TOKEN }} ${{ github.repository }} --issue_number '${{ github.event.issue.number }}'
+          cp -a /opt/Gwriter/docs ${{ github.workspace }}
+          cp -a /opt/Gwriter/backup ${{ github.workspace }}
+          cp /opt/Gwriter/blogBase.json ${{ github.workspace }}
+
+      - name: update html
+        run: |
+          git config --local user.email "$(jq -r ".email" config.json)"
+          git config --local user.name "${{ github.repository_owner }}"
+          git add .
+          git commit -a -m '🎉auto update by Gwriter action' || echo "nothing to commit"
+          git push || echo "nothing to push"
+          sleep 3
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'docs/'
+
+  deploy:
+    name: Deploy blog
+    runs-on: ubuntu-20.04
+    needs: build
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    concurrency:
+      group: "pages"
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
